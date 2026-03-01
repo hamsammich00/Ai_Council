@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Council Controller</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>Distributed AI Council</h1>
+
+      <section class="prompt-card">
+        <label for="prompt">Prompt</label>
+        <textarea id="prompt" placeholder="Ask the council..." rows="8"></textarea>
+        <button id="runBtn">Run Council</button>
+        <p id="loading" class="loading hidden">Running council...</p>
+      </section>
+
+      <section class="results-grid">
+        <article class="panel">
+          <h2>Engineer</h2>
+          <pre id="engineer">No response yet.</pre>
+        </article>
+
+        <article class="panel">
+          <h2>Architect</h2>
+          <pre id="architect">No response yet.</pre>
+        </article>
+
+        <article class="panel">
+          <h2>Security</h2>
+          <pre id="security">No response yet.</pre>
+        </article>
+
+        <article class="panel panel-final">
+          <h2>Final Decision (Judge)</h2>
+          <pre id="final">No response yet.</pre>
+        </article>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
