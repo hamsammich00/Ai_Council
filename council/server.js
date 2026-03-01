@@ -10,7 +10,8 @@ const ENGINEER_URL = 'http://ENGINEER_IP:8081/completion';
 const ARCHITECT_URL = 'http://ARCHITECT_IP:8082/completion';
 const SECURITY_URL = 'http://SECURITY_IP:8083/completion';
 const JUDGE_URL = 'http://JUDGE_IP:8084/completion';
-const REQUEST_TIMEOUT_MS = 60000;
+const ROLE_TIMEOUT_MS = 60000;
+const JUDGE_TIMEOUT_MS = 180000;
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -29,9 +30,9 @@ function extractModelText(body) {
   return '';
 }
 
-async function postToModel(url, payload) {
+async function postToModel(url, payload, timeoutMs) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const response = await fetch(url, {
@@ -58,7 +59,7 @@ async function postToModel(url, payload) {
     return extractModelText(parsed).trim();
   } catch (error) {
     if (error && error.name === 'AbortError') {
-      throw new Error(`Timeout after ${REQUEST_TIMEOUT_MS}ms`);
+      throw new Error(`Timeout after ${timeoutMs}ms`);
     }
 
     throw new Error(error && error.message ? error.message : 'Model request failed');
@@ -69,11 +70,15 @@ async function postToModel(url, payload) {
 
 async function callCouncilRole({ url, personality, prompt, temperature }) {
   try {
-    const responseText = await postToModel(url, {
-      prompt: `${personality}\n\nUser request:\n${prompt}`,
-      n_predict: 400,
-      temperature,
-    });
+    const responseText = await postToModel(
+      url,
+      {
+        prompt: `${personality}\n\nUser request:\n${prompt}`,
+        n_predict: 400,
+        temperature,
+      },
+      ROLE_TIMEOUT_MS
+    );
 
     return responseText || 'Error: Empty response';
   } catch (error) {
@@ -87,11 +92,15 @@ function buildJudgePrompt(userPrompt, engineer, architect, security) {
 
 async function callJudge(prompt) {
   try {
-    const responseText = await postToModel(JUDGE_URL, {
-      prompt,
-      n_predict: 500,
-      temperature: 0.15,
-    });
+    const responseText = await postToModel(
+      JUDGE_URL,
+      {
+        prompt,
+        n_predict: 400,
+        temperature: 0.15,
+      },
+      JUDGE_TIMEOUT_MS
+    );
 
     return responseText || 'Error: Empty response';
   } catch (error) {
