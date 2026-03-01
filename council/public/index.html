@@ -11,6 +11,26 @@
       <h1>Distributed AI Council</h1>
 
       <section class="prompt-card">
+        <div class="mode-row">
+          <div>
+            <label for="mode">Mode</label>
+            <select id="mode">
+              <option value="council">Council</option>
+              <option value="single">Single</option>
+            </select>
+          </div>
+
+          <div>
+            <label for="singleRole">Single Role</label>
+            <select id="singleRole">
+              <option value="engineer">Engineer</option>
+              <option value="architect">Architect</option>
+              <option value="security">Security</option>
+              <option value="judge">Judge</option>
+            </select>
+          </div>
+        </div>
+
         <label for="prompt">Prompt</label>
         <textarea id="prompt" placeholder="Ask the council..." rows="8"></textarea>
         <button id="runBtn">Run Council</button>

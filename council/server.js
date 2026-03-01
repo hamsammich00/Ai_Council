@@ -6,12 +6,13 @@ const architectPersonality = require('./personalities/architect');
 const securityPersonality = require('./personalities/security');
 const judgePersonality = require('./personalities/judge');
 
-const ENGINEER_URL = 'http://ENGINEER_IP:8081/completion';
-const ARCHITECT_URL = 'http://ARCHITECT_IP:8082/completion';
-const SECURITY_URL = 'http://SECURITY_IP:8083/completion';
-const JUDGE_URL = 'http://JUDGE_IP:8084/completion';
+const ENGINEER_URL = 'http://192.168.8.120:8081/completion';
+const ARCHITECT_URL = 'http://192.168.8.183:8082/completion';
+const SECURITY_URL = 'http://192.168.8.229:8083/completion';
+const JUDGE_URL = 'http://192.168.8.206:8084/completion';
 const ROLE_TIMEOUT_MS = 60000;
 const JUDGE_TIMEOUT_MS = 180000;
+const SINGLE_TIMEOUT_MS = 120000;
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -86,6 +87,24 @@ async function callCouncilRole({ url, personality, prompt, temperature }) {
   }
 }
 
+async function callSingleRole({ url, personality, prompt, temperature, nPredict }) {
+  try {
+    const responseText = await postToModel(
+      url,
+      {
+        prompt: `${personality}\n\nUser request:\n${prompt}`,
+        n_predict: nPredict,
+        temperature,
+      },
+      SINGLE_TIMEOUT_MS
+    );
+
+    return responseText || 'Error: Empty response';
+  } catch (error) {
+    return `Error: ${error.message}`;
+  }
+}
+
 function buildJudgePrompt(userPrompt, engineer, architect, security) {
   return `${judgePersonality}\n\nUser request:\n${userPrompt}\n\nEngineer response:\n${engineer}\n\nArchitect response:\n${architect}\n\nSecurity response:\n${security}\n\nAs Judge, analyze the responses and produce the best final answer.`;
 }
@@ -145,6 +164,57 @@ app.post('/ask', async (req, res) => {
     security,
     final,
   });
+});
+
+app.post('/ask-single', async (req, res) => {
+  const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : '';
+  const role = typeof req.body?.role === 'string' ? req.body.role.trim().toLowerCase() : '';
+
+  if (!prompt) {
+    return res.status(400).json({ error: 'prompt is required' });
+  }
+
+  const roleConfig = {
+    engineer: {
+      url: ENGINEER_URL,
+      personality: engineerPersonality,
+      temperature: 0.2,
+      nPredict: 500,
+    },
+    architect: {
+      url: ARCHITECT_URL,
+      personality: architectPersonality,
+      temperature: 0.3,
+      nPredict: 350,
+    },
+    security: {
+      url: SECURITY_URL,
+      personality: securityPersonality,
+      temperature: 0.25,
+      nPredict: 350,
+    },
+    judge: {
+      url: JUDGE_URL,
+      personality: judgePersonality,
+      temperature: 0.15,
+      nPredict: 450,
+    },
+  };
+
+  const selected = roleConfig[role];
+  if (!selected) {
+    return res.status(400).json({ error: 'role must be one of: engineer, architect, security, judge' });
+  }
+
+  const response = await callSingleRole({
+    url: selected.url,
+    personality: selected.personality,
+    prompt,
+    temperature: selected.temperature,
+    nPredict: selected.nPredict,
+  });
+
+  return res.json({ role, response });
 });
 
 const PORT = 3000;
