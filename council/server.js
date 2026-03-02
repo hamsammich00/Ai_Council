@@ -7,16 +7,24 @@ const architectPersonality = require('./personalities/architect');
 const securityPersonality = require('./personalities/security');
 const judgePersonality = require('./personalities/judge');
 
-const ENGINEER_URL = 'http://192.168.8.120:8081/completion';
-const ARCHITECT_URL = 'http://192.168.8.183:8082/completion';
+const ENGINEER_COMPLETION_URL = 'http://192.168.8.120:8081/completion';
+const ARCHITECT_COMPLETION_URL = 'http://192.168.8.183:8082/completion';
+const ENGINEER_CHAT_URL = 'http://192.168.8.120:8081/chat/completions';
+const ARCHITECT_CHAT_URL = 'http://192.168.8.183:8082/chat/completions';
+const SECURITY_CHAT_URL = 'http://192.168.8.229:8083/chat/completions';
+const JUDGE_COMPLETION_URL = 'http://192.168.8.206:8084/completion';
+const JUDGE_CHAT_URL = 'http://192.168.8.206:8084/chat/completions';
+const ENGINEER_URL = ENGINEER_COMPLETION_URL;
+const ARCHITECT_URL = ARCHITECT_COMPLETION_URL;
 const SECURITY_URL = 'http://192.168.8.229:8083/completion';
-const JUDGE_URL = 'http://192.168.8.206:8084/completion';
+const JUDGE_URL = JUDGE_COMPLETION_URL;
 const ROLE_TIMEOUT_MS = 60000;
-const JUDGE_TIMEOUT_MS = 180000;
+const JUDGE_TIMEOUT_MS = 240000;
 const SINGLE_TIMEOUT_MS = 120000;
+const EMPTY_RESPONSE_RETRY_DELAY_MS = 250;
 const JOB_TTL_MS = 10 * 60 * 1000;
 const JOB_CLEANUP_INTERVAL_MS = 60 * 1000;
-
+const JUDGE_MAX_INPUT_CHARS_PER_ROLE = 1200;
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -83,18 +91,36 @@ function extractModelText(body) {
 }
 
 function toFiniteNumber(value) {
-  return Number.isFinite(value) ? value : null;
+  const numeric = typeof value === 'string' ? Number(value) : value;
+  return Number.isFinite(numeric) ? numeric : null;
 }
 
-function extractModelStats(body) {
+function extractModelStats(body, extractedText = '') {
   if (!body || typeof body !== 'object') {
     return null;
   }
 
   const timings = body.timings && typeof body.timings === 'object' ? body.timings : {};
-  const completionTokens = toFiniteNumber(body.tokens_predicted);
-  const promptTokens = toFiniteNumber(body.tokens_evaluated);
-  const cachedTokens = toFiniteNumber(body.tokens_cached);
+  let completionTokens = toFiniteNumber(
+    body.tokens_predicted ??
+    body.completion_tokens ??
+    body.n_tokens_predicted ??
+    timings.predicted_n ??
+    timings.generated_n
+  );
+  const promptTokens = toFiniteNumber(
+    body.tokens_evaluated ??
+    body.prompt_tokens ??
+    body.n_tokens_evaluated ??
+    timings.prompt_n
+  );
+  const cachedTokens = toFiniteNumber(body.tokens_cached ?? body.cached_tokens ?? timings.cached_n);
+  if (completionTokens === null && Array.isArray(body.tokens)) {
+    completionTokens = body.tokens.length;
+  }
+  if (completionTokens === null && typeof extractedText === 'string' && extractedText.trim()) {
+    completionTokens = extractedText.trim().split(/\s+/).length;
+  }
   const predictedMs = toFiniteNumber(
     timings.predicted_ms ?? timings.prediction_ms ?? timings.decode_ms ?? timings.generation_ms
   );
@@ -172,7 +198,7 @@ async function postToModel(url, payload, timeoutMs) {
 
     return {
       text: extracted,
-      stats: extractModelStats(parsed),
+      stats: extractModelStats(parsed, extracted),
     };
   } catch (error) {
     if (error && error.name === 'AbortError') {
@@ -185,21 +211,114 @@ async function postToModel(url, payload, timeoutMs) {
   }
 }
 
-async function callCouncilRole({ url, personality, prompt, temperature }) {
-  try {
+async function callCouncilRole({
+  roleKey,
+  url,
+  personality,
+  prompt,
+  temperature,
+  apiStyle = 'completion',
+  fallbackCompletionUrl = null,
+}) {
+  const runAttempt = async () => {
     const taskId = crypto.randomUUID();
-    const modelResult = await postToModel(
+    const payload = apiStyle === 'chat'
+      ? buildChatPayload({
+        messages: buildRoleMessages(personality, prompt, taskId),
+        nPredict: 400,
+        temperature,
+      })
+      : buildModelPayload({
+        prompt: buildRolePrompt(personality, prompt, taskId),
+        nPredict: 400,
+        temperature,
+      });
+
+    return postToModel(
       url,
+      payload,
+      ROLE_TIMEOUT_MS
+    );
+  };
+
+  const runCompletionFallbackAttempt = async () => {
+    if (!fallbackCompletionUrl) {
+      throw new Error('No completion fallback URL configured');
+    }
+    const taskId = crypto.randomUUID();
+    return postToModel(
+      fallbackCompletionUrl,
       buildModelPayload({
-        prompt: `${personality}\n\nTask:\n${prompt}\n\nTask ID: ${taskId}`,
+        prompt: buildRolePrompt(personality, prompt, taskId),
         nPredict: 400,
         temperature,
       }),
       ROLE_TIMEOUT_MS
     );
+  };
 
-    return modelResult;
+  const runEngineerFallbackAttempt = async () => {
+    const taskId = crypto.randomUUID();
+    return postToModel(
+      fallbackCompletionUrl || ENGINEER_COMPLETION_URL,
+      buildModelPayload({
+        prompt: buildEngineerFallbackPrompt(prompt, taskId),
+        nPredict: 220,
+        temperature: 0.2,
+      }),
+      ROLE_TIMEOUT_MS
+    );
+  };
+
+  try {
+    return await runAttempt();
   } catch (error) {
+    if (isRetryableEmptyError(error)) {
+      await sleep(EMPTY_RESPONSE_RETRY_DELAY_MS);
+      try {
+        return await runAttempt();
+      } catch (retryError) {
+        if (roleKey === 'engineer' && isRetryableEmptyError(retryError)) {
+          await sleep(EMPTY_RESPONSE_RETRY_DELAY_MS);
+          try {
+            return await runEngineerFallbackAttempt();
+          } catch (fallbackError) {
+            return {
+              text: `Error: ${fallbackError.message}`,
+              stats: null,
+            };
+          }
+        }
+
+        if (apiStyle === 'chat' && fallbackCompletionUrl) {
+          try {
+            return await runCompletionFallbackAttempt();
+          } catch (fallbackError) {
+            return {
+              text: `Error: ${fallbackError.message}`,
+              stats: null,
+            };
+          }
+        }
+
+        return {
+          text: `Error: ${retryError.message}`,
+          stats: null,
+        };
+      }
+    }
+
+    if (apiStyle === 'chat' && fallbackCompletionUrl) {
+      try {
+        return await runCompletionFallbackAttempt();
+      } catch (fallbackError) {
+        return {
+          text: `Error: ${fallbackError.message}`,
+          stats: null,
+        };
+      }
+    }
+
     return {
       text: `Error: ${error.message}`,
       stats: null,
@@ -207,21 +326,111 @@ async function callCouncilRole({ url, personality, prompt, temperature }) {
   }
 }
 
-async function callSingleRole({ url, personality, prompt, temperature, nPredict }) {
-  try {
+async function callSingleRole({
+  roleKey,
+  url,
+  personality,
+  prompt,
+  temperature,
+  nPredict,
+  apiStyle = 'completion',
+  fallbackCompletionUrl = null,
+}) {
+  const runAttempt = async () => {
     const taskId = crypto.randomUUID();
-    const modelResult = await postToModel(
-      url,
+    const payload = apiStyle === 'chat'
+      ? buildChatPayload({
+        messages: buildRoleMessages(personality, prompt, taskId),
+        nPredict,
+        temperature,
+      })
+      : buildModelPayload({
+        prompt: buildRolePrompt(personality, prompt, taskId),
+        nPredict,
+        temperature,
+      });
+
+    return postToModel(url, payload, SINGLE_TIMEOUT_MS);
+  };
+
+  const runCompletionFallbackAttempt = async () => {
+    if (!fallbackCompletionUrl) {
+      throw new Error('No completion fallback URL configured');
+    }
+    const taskId = crypto.randomUUID();
+    return postToModel(
+      fallbackCompletionUrl,
       buildModelPayload({
-        prompt: `${personality}\n\nTask:\n${prompt}\n\nTask ID: ${taskId}`,
+        prompt: buildRolePrompt(personality, prompt, taskId),
         nPredict,
         temperature,
       }),
       SINGLE_TIMEOUT_MS
     );
+  };
 
-    return modelResult;
+  const runEngineerFallbackAttempt = async () => {
+    const taskId = crypto.randomUUID();
+    return postToModel(
+      fallbackCompletionUrl || ENGINEER_COMPLETION_URL,
+      buildModelPayload({
+        prompt: buildEngineerFallbackPrompt(prompt, taskId),
+        nPredict: Math.min(nPredict, 260),
+        temperature: 0.2,
+      }),
+      SINGLE_TIMEOUT_MS
+    );
+  };
+
+  try {
+    return await runAttempt();
   } catch (error) {
+    if (isRetryableEmptyError(error)) {
+      await sleep(EMPTY_RESPONSE_RETRY_DELAY_MS);
+      try {
+        return await runAttempt();
+      } catch (retryError) {
+        if (roleKey === 'engineer' && isRetryableEmptyError(retryError)) {
+          await sleep(EMPTY_RESPONSE_RETRY_DELAY_MS);
+          try {
+            return await runEngineerFallbackAttempt();
+          } catch (fallbackError) {
+            return {
+              text: `Error: ${fallbackError.message}`,
+              stats: null,
+            };
+          }
+        }
+
+        if (apiStyle === 'chat' && fallbackCompletionUrl) {
+          try {
+            return await runCompletionFallbackAttempt();
+          } catch (fallbackError) {
+            return {
+              text: `Error: ${fallbackError.message}`,
+              stats: null,
+            };
+          }
+        }
+
+        return {
+          text: `Error: ${retryError.message}`,
+          stats: null,
+        };
+      }
+    }
+
+    if (apiStyle === 'chat' && fallbackCompletionUrl) {
+      try {
+        return await runCompletionFallbackAttempt();
+      } catch (fallbackError) {
+        return {
+          text: `Error: ${fallbackError.message}`,
+          stats: null,
+        };
+      }
+    }
+
     return {
       text: `Error: ${error.message}`,
       stats: null,
@@ -303,39 +512,280 @@ function cleanupOldJobs() {
 
 setInterval(cleanupOldJobs, JOB_CLEANUP_INTERVAL_MS).unref();
 
-function buildModelPayload({ prompt, nPredict, temperature }) {
+function buildModelPayload({ prompt, nPredict, temperature, sampling = {} }) {
   return {
     prompt,
     n_predict: nPredict,
     temperature,
     cache_prompt: false,
     n_keep: 0,
+    ...sampling,
   };
 }
 
+function buildChatPayload({ messages, nPredict, temperature, sampling = {} }) {
+  return {
+    messages,
+    n_predict: nPredict,
+    temperature,
+    cache_prompt: false,
+    n_keep: 0,
+    ...sampling,
+  };
+}
+
+function buildJudgeMessages(prompt, taskId) {
+  return [
+    {
+      role: 'system',
+      content: `${judgePersonality}
+
+Hard format rules:
+- Exception: if user explicitly requests a fixed short format (for example "1 sentence"), follow it and skip section template.
+- Use exactly these headers, once each, in order: Summary, Recommended Approach, Key Tradeoffs.
+- If code is requested, add a fourth section after Key Tradeoffs titled: Code.
+- For non-code lines, every non-empty line must start with "- ".
+- Use bullets by default. If code is required, include a code block and keep non-code text as bullets.
+- If role inputs are limited, still satisfy minimum bullet counts with best-judgment synthesis.
+- Follow the output requirements exactly.`,
+    },
+    {
+      role: 'user',
+      content: `${prompt}\n\nTask ID: ${taskId}`,
+    },
+  ];
+}
+
+function compactForJudge(text, maxChars = JUDGE_MAX_INPUT_CHARS_PER_ROLE) {
+  if (typeof text !== 'string') return '';
+  const normalized = text.trim();
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, maxChars)}\n...[truncated for judge input]`;
+}
+
+function buildRolePrompt(personality, prompt, taskId) {
+  return `${personality}\n\nTask:\n${prompt}\n\nOutput requirement:\n- Return at least one non-empty sentence.\n- Do not return blank output.\n\nTask ID: ${taskId}`;
+}
+
+function buildRoleMessages(personality, prompt, taskId) {
+  return [
+    {
+      role: 'system',
+      content: `${personality}\n\nOutput requirement:\n- Return at least one non-empty sentence.\n- Do not return blank output.`,
+    },
+    {
+      role: 'user',
+      content: `Task:\n${prompt}\n\nTask ID: ${taskId}`,
+    },
+  ];
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableEmptyError(error) {
+  const message = error && error.message ? error.message : '';
+  return message.includes('Empty model text');
+}
+
+function buildEngineerFallbackPrompt(prompt, taskId) {
+  return [
+    'You are an engineering assistant.',
+    '',
+    'Task:',
+    prompt,
+    '',
+    'Instructions:',
+    '- Return a non-empty answer.',
+    '- If coding is requested, provide runnable code.',
+    '- If coding is not requested, respond in 1-2 plain sentences.',
+    '',
+    `Task ID: ${taskId}`,
+  ].join('\n');
+}
+
+function shouldRequireJudgeCodeSection(userPrompt, engineer, architect, security) {
+  const request = typeof userPrompt === 'string' ? userPrompt.toLowerCase() : '';
+  const codeKeywords = [
+    'code',
+    'script',
+    'powershell',
+    'bash',
+    'shell',
+    'python',
+    'javascript',
+    'node',
+    'ansible',
+    'playbook',
+    'yaml',
+    'json',
+    'dockerfile',
+    'config',
+    'command',
+  ];
+  const requestAsksForCode = codeKeywords.some((keyword) => request.includes(keyword));
+
+  const roleText = [engineer, architect, security]
+    .filter((value) => typeof value === 'string')
+    .join('\n');
+  const roleHasCode =
+    roleText.includes('```') ||
+    /(^|\n)\s*(Get-|Set-|Install-|New-|sudo |apt |yum |dnf |systemctl |kubectl |docker )/i.test(roleText);
+
+  return requestAsksForCode || roleHasCode;
+}
+
 function buildJudgePrompt(userPrompt, engineer, architect, security) {
-  return `${judgePersonality}\n\nTask:\n${userPrompt}\n\nEngineer response:\n${engineer}\n\nArchitect response:\n${architect}\n\nSecurity response:\n${security}\n\nAs Judge, analyze the responses and produce the best final answer.`;
+  const codeRequired = shouldRequireJudgeCodeSection(userPrompt, engineer, architect, security);
+  const codeInstruction = codeRequired
+    ? '\n\nCode requirement:\n- REQUIRED: include a section titled "Code" after "Key Tradeoffs".\n- Include exactly one fenced code block in that section.\n- Do not omit the Code section.'
+    : '';
+
+  return `User request:\n${userPrompt}
+
+Engineer response:
+${compactForJudge(engineer)}
+
+Architect response:
+${compactForJudge(architect)}
+
+Security response:
+${compactForJudge(security)}
+
+As Judge, analyze the responses and produce one integrated final answer. If one role failed, continue with available role outputs.${codeInstruction}`;
+}
+
+function trimRepeatedJudgeSections(text) {
+  if (typeof text !== 'string' || !text.trim()) {
+    return text;
+  }
+
+  const sectionPattern = /^(\*{0,2})\s*(summary|recommended approach|key tradeoffs)\s*\1\s*:?$/i;
+  const lines = text.split('\n');
+  const sectionCounts = {
+    summary: 0,
+    'recommended approach': 0,
+    'key tradeoffs': 0,
+  };
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i].trim();
+    const match = line.match(sectionPattern);
+    if (!match) {
+      continue;
+    }
+
+    const section = match[2].toLowerCase();
+    sectionCounts[section] += 1;
+    const hasFullFirstCycle =
+      sectionCounts.summary >= 1 &&
+      sectionCounts['recommended approach'] >= 1 &&
+      sectionCounts['key tradeoffs'] >= 1;
+    const startsSecondCycle =
+      hasFullFirstCycle &&
+      (sectionCounts.summary > 1 ||
+      sectionCounts['recommended approach'] > 1 ||
+      sectionCounts['key tradeoffs'] > 1);
+
+    if (startsSecondCycle) {
+      return lines.slice(0, i).join('\n').trim();
+    }
+  }
+
+  const hasFullFirstCycle =
+    sectionCounts.summary >= 1 &&
+    sectionCounts['recommended approach'] >= 1 &&
+    sectionCounts['key tradeoffs'] >= 1;
+  if (!hasFullFirstCycle) {
+    return text.trim();
+  }
+
+  const answerIndices = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim().toLowerCase() === 'answer:') {
+      answerIndices.push(i);
+    }
+  }
+  if (answerIndices.length >= 2) {
+    return lines.slice(0, answerIndices[1]).join('\n').trim();
+  }
+
+  return text.trim();
 }
 
 async function callJudge(prompt) {
-  try {
+  const runAttempt = async () => {
     const taskId = crypto.randomUUID();
-    const modelResult = await postToModel(
-      JUDGE_URL,
-      buildModelPayload({
-        prompt: `${prompt}\n\nTask ID: ${taskId}`,
-        nPredict: 400,
-        temperature: 0.15,
+    const result = await postToModel(
+      JUDGE_CHAT_URL,
+      buildChatPayload({
+        messages: buildJudgeMessages(prompt, taskId),
+        nPredict: 800,
+        temperature: 0.1,
+        sampling: {
+          top_p: 0.9,
+          repeat_penalty: 1.06,
+          repeat_last_n: 256,
+        },
       }),
       JUDGE_TIMEOUT_MS
     );
-
-    return modelResult;
-  } catch (error) {
     return {
-      text: `Error: ${error.message}`,
-      stats: null,
+      ...result,
+      text: trimRepeatedJudgeSections(result.text),
     };
+  };
+
+  const runCompletionFallbackAttempt = async () => {
+    const taskId = crypto.randomUUID();
+    const result = await postToModel(
+      JUDGE_COMPLETION_URL,
+      buildModelPayload({
+        prompt: `${judgePersonality}\n\nHard format rules:\n- Exception: if user explicitly requests a fixed short format (for example "1 sentence"), follow it and skip section template.\n- Use exactly these headers, once each, in order: Summary, Recommended Approach, Key Tradeoffs.\n- If code is requested, add a fourth section after Key Tradeoffs titled: Code.\n- For non-code lines, every non-empty line must start with "- ".\n- Use bullets by default. If code is required, include a code block and keep non-code text as bullets.\n- If role inputs are limited, still satisfy minimum bullet counts with best-judgment synthesis.\n\n${prompt}\n\nFollow the output requirements exactly.\n\nTask ID: ${taskId}`,
+        nPredict: 800,
+        temperature: 0.1,
+        sampling: {
+          top_p: 0.9,
+          repeat_penalty: 1.06,
+          repeat_last_n: 256,
+        },
+      }),
+      JUDGE_TIMEOUT_MS
+    );
+    return {
+      ...result,
+      text: trimRepeatedJudgeSections(result.text),
+    };
+  };
+
+  try {
+    return await runAttempt();
+  } catch (error) {
+    if (isRetryableEmptyError(error)) {
+      await sleep(EMPTY_RESPONSE_RETRY_DELAY_MS);
+      try {
+        return await runAttempt();
+      } catch (retryError) {
+        try {
+          return await runCompletionFallbackAttempt();
+        } catch (fallbackError) {
+          return {
+            text: `Error: ${fallbackError.message}`,
+            stats: null,
+          };
+        }
+      }
+    }
+
+    try {
+      return await runCompletionFallbackAttempt();
+    } catch (fallbackError) {
+      return {
+        text: `Error: ${fallbackError.message}`,
+        stats: null,
+      };
+    }
   }
 }
 
@@ -344,10 +794,13 @@ async function runCouncilJob(job) {
     const rolesStartedAt = Date.now();
     const roleTasks = [
       timeCall(() => callCouncilRole({
-        url: ENGINEER_URL,
+        roleKey: 'engineer',
+        url: ENGINEER_CHAT_URL,
         personality: engineerPersonality,
         prompt: job.prompt,
         temperature: 0.2,
+        apiStyle: 'chat',
+        fallbackCompletionUrl: ENGINEER_COMPLETION_URL,
       })).then((timed) => {
         job.responses.engineer = timed.value.text;
         job.timings.engineer_ms = timed.durationMs;
@@ -355,10 +808,13 @@ async function runCouncilJob(job) {
         job.updatedAt = Date.now();
       }),
       timeCall(() => callCouncilRole({
-        url: ARCHITECT_URL,
+        roleKey: 'architect',
+        url: ARCHITECT_CHAT_URL,
         personality: architectPersonality,
         prompt: job.prompt,
         temperature: 0.3,
+        apiStyle: 'chat',
+        fallbackCompletionUrl: ARCHITECT_COMPLETION_URL,
       })).then((timed) => {
         job.responses.architect = timed.value.text;
         job.timings.architect_ms = timed.durationMs;
@@ -366,10 +822,13 @@ async function runCouncilJob(job) {
         job.updatedAt = Date.now();
       }),
       timeCall(() => callCouncilRole({
-        url: SECURITY_URL,
+        roleKey: 'security',
+        url: SECURITY_CHAT_URL,
         personality: securityPersonality,
         prompt: job.prompt,
         temperature: 0.25,
+        apiStyle: 'chat',
+        fallbackCompletionUrl: SECURITY_URL,
       })).then((timed) => {
         job.responses.security = timed.value.text;
         job.timings.security_ms = timed.durationMs;
@@ -419,22 +878,31 @@ app.post('/ask', async (req, res) => {
   const rolesStartedAt = Date.now();
   const [engineerTimed, architectTimed, securityTimed] = await Promise.all([
     timeCall(() => callCouncilRole({
-      url: ENGINEER_URL,
+      roleKey: 'engineer',
+      url: ENGINEER_CHAT_URL,
       personality: engineerPersonality,
       prompt,
       temperature: 0.2,
+      apiStyle: 'chat',
+      fallbackCompletionUrl: ENGINEER_COMPLETION_URL,
     })),
     timeCall(() => callCouncilRole({
-      url: ARCHITECT_URL,
+      roleKey: 'architect',
+      url: ARCHITECT_CHAT_URL,
       personality: architectPersonality,
       prompt,
       temperature: 0.3,
+      apiStyle: 'chat',
+      fallbackCompletionUrl: ARCHITECT_COMPLETION_URL,
     })),
     timeCall(() => callCouncilRole({
-      url: SECURITY_URL,
+      roleKey: 'security',
+      url: SECURITY_CHAT_URL,
       personality: securityPersonality,
       prompt,
       temperature: 0.25,
+      apiStyle: 'chat',
+      fallbackCompletionUrl: SECURITY_URL,
     })),
   ]);
   const rolesStageMs = Date.now() - rolesStartedAt;
@@ -503,28 +971,40 @@ app.post('/ask-single', async (req, res) => {
 
   const roleConfig = {
     engineer: {
-      url: ENGINEER_URL,
+      roleKey: 'engineer',
+      url: ENGINEER_CHAT_URL,
       personality: engineerPersonality,
       temperature: 0.2,
       nPredict: 500,
+      apiStyle: 'chat',
+      fallbackCompletionUrl: ENGINEER_COMPLETION_URL,
     },
     architect: {
-      url: ARCHITECT_URL,
+      roleKey: 'architect',
+      url: ARCHITECT_CHAT_URL,
       personality: architectPersonality,
       temperature: 0.3,
       nPredict: 350,
+      apiStyle: 'chat',
+      fallbackCompletionUrl: ARCHITECT_COMPLETION_URL,
     },
     security: {
-      url: SECURITY_URL,
+      roleKey: 'security',
+      url: SECURITY_CHAT_URL,
       personality: securityPersonality,
       temperature: 0.25,
       nPredict: 350,
+      apiStyle: 'chat',
+      fallbackCompletionUrl: SECURITY_URL,
     },
     judge: {
-      url: JUDGE_URL,
+      roleKey: 'judge',
+      url: JUDGE_CHAT_URL,
       personality: judgePersonality,
-      temperature: 0.15,
-      nPredict: 450,
+      temperature: 0.1,
+      nPredict: 800,
+      apiStyle: 'chat',
+      fallbackCompletionUrl: JUDGE_COMPLETION_URL,
     },
   };
 
@@ -534,11 +1014,14 @@ app.post('/ask-single', async (req, res) => {
   }
 
   const timed = await timeCall(() => callSingleRole({
+    roleKey: selected.roleKey,
     url: selected.url,
     personality: selected.personality,
     prompt,
     temperature: selected.temperature,
     nPredict: selected.nPredict,
+    apiStyle: selected.apiStyle,
+    fallbackCompletionUrl: selected.fallbackCompletionUrl,
   }));
 
   return res.json({

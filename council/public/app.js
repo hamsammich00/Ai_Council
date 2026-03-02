@@ -46,6 +46,24 @@ function formatTps(value) {
   return Number.isFinite(value) ? value.toFixed(1) : '';
 }
 
+function getTokenLabel(metrics) {
+  if (!metrics || typeof metrics !== 'object') {
+    return '';
+  }
+
+  if (Number.isFinite(metrics.total_tokens)) {
+    return formatInt(metrics.total_tokens);
+  }
+
+  if (Number.isFinite(metrics.completion_tokens) || Number.isFinite(metrics.prompt_tokens)) {
+    const completion = Number.isFinite(metrics.completion_tokens) ? formatInt(metrics.completion_tokens) : '?';
+    const prompt = Number.isFinite(metrics.prompt_tokens) ? formatInt(metrics.prompt_tokens) : '?';
+    return `${completion}+${prompt}`;
+  }
+
+  return '';
+}
+
 function buildRoleMeta({ timeMs, metrics, fallbackLabel }) {
   const parts = [];
   if (Number.isFinite(timeMs)) {
@@ -54,8 +72,9 @@ function buildRoleMeta({ timeMs, metrics, fallbackLabel }) {
     parts.push(fallbackLabel);
   }
 
-  if (metrics && Number.isFinite(metrics.total_tokens)) {
-    parts.push(`Tok: ${formatInt(metrics.total_tokens)}`);
+  const tokenLabel = getTokenLabel(metrics);
+  if (tokenLabel) {
+    parts.push(`Tok: ${tokenLabel}`);
   }
 
   if (metrics && Number.isFinite(metrics.tokens_per_second)) {
@@ -123,6 +142,8 @@ function renderCouncilStatus(payload) {
     }),
     final: done
       ? `Judge: ${formatMs(timings.judge_ms)} | Total: ${formatMs(timings.total_ms)}${
+        getTokenLabel(metrics.judge) ? ` | Tok: ${getTokenLabel(metrics.judge)}` : ''
+      }${
         Number.isFinite(metrics.judge?.tokens_per_second) ? ` | Tok/s: ${formatTps(metrics.judge.tokens_per_second)}` : ''
       }`
       : stage === 'judge'

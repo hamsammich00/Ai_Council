@@ -12,16 +12,16 @@
 }
 
 [data-theme="dark"] {
-  --bg: #0f1724;
-  --bg-gradient-start: #0f1724;
-  --bg-gradient-end: #1b2636;
-  --card: #182233;
-  --border: #2b3a4f;
-  --text: #d7e1f0;
-  --muted: #9eb0c8;
+  --bg: #05070b;
+  --bg-gradient-start: #030508;
+  --bg-gradient-end: #0a0d12;
+  --card: #0d1117;
+  --border: #1f2630;
+  --text: #e5e7eb;
+  --muted: #a1a9b6;
   --accent: #3b82f6;
   --accent-hover: #2563eb;
-  --panel-text: #d7e1f0;
+  --panel-text: #e5e7eb;
 }
 
 * {
