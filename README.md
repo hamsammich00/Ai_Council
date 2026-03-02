@@ -1,6 +1,6 @@
 # Distributed AI Council Controller
 
-Minimal web orchestration server for a multi-role local AI council (Engineer, Architect, Security, Judge) backed by `llama.cpp` HTTP servers.
+Minimal web orchestration server for a multi-role local AI council (Engineer, Architect, Security, Judge) backed by `llama.cpp` HTTP servers. Created with the assistance of CHATGPT and Codex by OpenAI.
 
 ## What It Does
 
