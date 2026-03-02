@@ -19,7 +19,7 @@ const ARCHITECT_URL = ARCHITECT_COMPLETION_URL;
 const SECURITY_URL = 'http://192.168.8.229:8083/completion';
 const JUDGE_URL = JUDGE_COMPLETION_URL;
 const ROLE_TIMEOUT_MS = 60000;
-const JUDGE_TIMEOUT_MS = 240000;
+const JUDGE_TIMEOUT_MS = 200000;
 const SINGLE_TIMEOUT_MS = 120000;
 const EMPTY_RESPONSE_RETRY_DELAY_MS = 250;
 const JOB_TTL_MS = 10 * 60 * 1000;
@@ -721,7 +721,7 @@ async function callJudge(prompt) {
       JUDGE_CHAT_URL,
       buildChatPayload({
         messages: buildJudgeMessages(prompt, taskId),
-        nPredict: 800,
+        nPredict: 1000,
         temperature: 0.1,
         sampling: {
           top_p: 0.9,
@@ -743,7 +743,7 @@ async function callJudge(prompt) {
       JUDGE_COMPLETION_URL,
       buildModelPayload({
         prompt: `${judgePersonality}\n\nHard format rules:\n- Exception: if user explicitly requests a fixed short format (for example "1 sentence"), follow it and skip section template.\n- Use exactly these headers, once each, in order: Summary, Recommended Approach, Key Tradeoffs.\n- If code is requested, add a fourth section after Key Tradeoffs titled: Code.\n- For non-code lines, every non-empty line must start with "- ".\n- Use bullets by default. If code is required, include a code block and keep non-code text as bullets.\n- If role inputs are limited, still satisfy minimum bullet counts with best-judgment synthesis.\n\n${prompt}\n\nFollow the output requirements exactly.\n\nTask ID: ${taskId}`,
-        nPredict: 800,
+        nPredict: 1000,
         temperature: 0.1,
         sampling: {
           top_p: 0.9,
@@ -1002,7 +1002,7 @@ app.post('/ask-single', async (req, res) => {
       url: JUDGE_CHAT_URL,
       personality: judgePersonality,
       temperature: 0.1,
-      nPredict: 800,
+      nPredict: 1000,
       apiStyle: 'chat',
       fallbackCompletionUrl: JUDGE_COMPLETION_URL,
     },
