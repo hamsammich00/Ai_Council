@@ -1,0 +1,14 @@
+# Node dependencies
+node_modules/
+council/node_modules/
+
+# Runtime artifacts
+*.log
+*.zip
+council/*.log
+council/*.zip
+
+# Local env/editor
+.env
+.DS_Store
+Thumbs.db
